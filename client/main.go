@@ -1,27 +1,27 @@
 package client
 
 import (
-	"os"
-
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
 var (
-	kubeconfig string
-	Clientset  *kubernetes.Clientset
+	Clientset *kubernetes.Clientset
 )
 
 func init() {
-	kubeconfig := os.Getenv("KUBECONFIG")
+	// Use the default kubeconfig loading rules
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	configOverrides := &clientcmd.ConfigOverrides{}
+	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
 
-	// use the current context in kubeconfig
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	// Get a rest.Config from the kubeconfig file
+	config, err := kubeConfig.ClientConfig()
 	if err != nil {
 		panic(err.Error())
 	}
 
-	// create the clientset
+	// Create the clientset
 	Clientset, err = kubernetes.NewForConfig(config)
 	if err != nil {
 		panic(err.Error())
