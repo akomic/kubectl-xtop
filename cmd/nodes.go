@@ -12,6 +12,7 @@ import (
 	"text/tabwriter"
 
 	client "github.com/akomic/kubectl-xtop/client"
+	v1 "k8s.io/api/core/v1"
 	"github.com/spf13/cobra"
 	resource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -58,18 +59,17 @@ type nodeInfoList []nodeInfo
 func (n nodeInfoList) Len() int      { return len(n) }
 func (n nodeInfoList) Swap(i, j int) { n[i], n[j] = n[j], n[i] }
 func (n nodeInfoList) Less(i, j int) bool {
-	switch sortBy {
-	case "cpu-req":
-		return n[i].resources["cpuReq"].Cmp(*n[j].resources["cpuReq"]) < 0
-	case "cpu-limit":
-		return n[i].resources["cpuLimit"].Cmp(*n[j].resources["cpuLimit"]) < 0
-	case "mem-req":
-		return n[i].resources["memReq"].Cmp(*n[j].resources["memReq"]) < 0
-	case "mem-limit":
-		return n[i].resources["memLimit"].Cmp(*n[j].resources["memLimit"]) < 0
-	default: // "name"
-		return n[i].name < n[j].name
+	sortMap := map[string]string{
+		"cpu-req":   "cpuReq",
+		"cpu-limit": "cpuLimit", 
+		"mem-req":   "memReq",
+		"mem-limit": "memLimit",
 	}
+	
+	if resourceKey, ok := sortMap[sortBy]; ok {
+		return n[i].resources[resourceKey].Cmp(*n[j].resources[resourceKey]) < 0
+	}
+	return n[i].name < n[j].name
 }
 
 func runNodesCommand() {
@@ -114,41 +114,7 @@ func runNodesCommand() {
 		}
 
 		for _, container := range pod.Spec.Containers {
-			if container.Resources.Requests != nil {
-				if cpu := container.Resources.Requests.Cpu(); cpu != nil {
-					nodesResources[nodeName]["cpuReq"].Add(*cpu)
-				} else if debug {
-					fmt.Printf("DEBUG: Pod %s/%s container %s has nil CPU request\n",
-						pod.Namespace, pod.Name, container.Name)
-				}
-				if memory := container.Resources.Requests.Memory(); memory != nil {
-					nodesResources[nodeName]["memReq"].Add(*memory)
-				} else if debug {
-					fmt.Printf("DEBUG: Pod %s/%s container %s has nil memory request\n",
-						pod.Namespace, pod.Name, container.Name)
-				}
-			} else if debug {
-				fmt.Printf("DEBUG: Pod %s/%s container %s has nil requests\n",
-					pod.Namespace, pod.Name, container.Name)
-			}
-
-			if container.Resources.Limits != nil {
-				if cpu := container.Resources.Limits.Cpu(); cpu != nil {
-					nodesResources[nodeName]["cpuLimit"].Add(*cpu)
-				} else if debug {
-					fmt.Printf("DEBUG: Pod %s/%s container %s has nil CPU limit\n",
-						pod.Namespace, pod.Name, container.Name)
-				}
-				if memory := container.Resources.Limits.Memory(); memory != nil {
-					nodesResources[nodeName]["memLimit"].Add(*memory)
-				} else if debug {
-					fmt.Printf("DEBUG: Pod %s/%s container %s has nil memory limit\n",
-						pod.Namespace, pod.Name, container.Name)
-				}
-			} else if debug {
-				fmt.Printf("DEBUG: Pod %s/%s container %s has nil limits\n",
-					pod.Namespace, pod.Name, container.Name)
-			}
+			addContainerResources(nodeName, container, nodesResources)
 		}
 	}
 
@@ -164,25 +130,55 @@ func runNodesCommand() {
 	// Sort the slice
 	sort.Sort(nodesList)
 
-	// Print results
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', tabwriter.TabIndent)
+	printTable(w, nodesList)
+}
 
-	// Print headers
-	headers := make([]string, len(columns))
-	for i, col := range columns {
-		headers[i] = col.header
+func addContainerResources(nodeName string, container v1.Container, nodesResources map[string]map[string]*resource.Quantity) {
+	addResourceIfPresent := func(resourceList v1.ResourceList, resourceType string, target string) {
+		if val, ok := resourceList[v1.ResourceName(resourceType)]; ok {
+			nodesResources[nodeName][target].Add(val)
+		} else if debug {
+			fmt.Printf("DEBUG: Container %s has nil %s\n", container.Name, resourceType)
+		}
 	}
-	fmt.Fprintln(w, strings.Join(headers, " \t ")+" \t")
+
+	if container.Resources.Requests != nil {
+		addResourceIfPresent(container.Resources.Requests, "cpu", "cpuReq")
+		addResourceIfPresent(container.Resources.Requests, "memory", "memReq")
+	} else if debug {
+		fmt.Printf("DEBUG: Container %s has nil requests\n", container.Name)
+	}
+
+	if container.Resources.Limits != nil {
+		addResourceIfPresent(container.Resources.Limits, "cpu", "cpuLimit")
+		addResourceIfPresent(container.Resources.Limits, "memory", "memLimit")
+	} else if debug {
+		fmt.Printf("DEBUG: Container %s has nil limits\n", container.Name)
+	}
+}
+
+func printTable(w *tabwriter.Writer, nodesList nodeInfoList) {
+	// Print headers
+	fmt.Fprintln(w, strings.Join(getRowValues(nodeInfo{}, true), "\t"))
 
 	// Print rows
 	for _, node := range nodesList {
-		values := make([]string, len(columns))
-		for i, col := range columns {
-			values[i] = col.getter(node)
-		}
-		fmt.Fprintln(w, strings.Join(values, " \t ")+" \t")
+		fmt.Fprintln(w, strings.Join(getRowValues(node, false), "\t"))
 	}
 	w.Flush()
+}
+
+func getRowValues(node nodeInfo, isHeader bool) []string {
+	values := make([]string, len(columns))
+	for i, col := range columns {
+		if isHeader {
+			values[i] = col.header
+		} else {
+			values[i] = col.getter(node)
+		}
+	}
+	return values
 }
 
 func init() {
