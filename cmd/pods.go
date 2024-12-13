@@ -235,7 +235,7 @@ func getPodRowValues(pod podInfo, isHeader bool) []string {
 func init() {
 
 	// Add resource columns dynamically
-	resourceKeys := []string{"cpuReq", "cpuLimit", "cpuUsage", "memReq", "memLimit", "memUsage"}
+	resourceKeys := []string{"cpuReq", "cpuLimit", "cpuUsage (%)", "memReq", "memLimit", "memUsage (%)"}
 	for _, key := range resourceKeys {
 		col := podColumn{
 			header: toPodColumnName(key),
@@ -243,15 +243,36 @@ func init() {
 				return func(pod podInfo) string {
 					var quantity *resource.Quantity
 					switch key {
-					case "cpuUsage":
-						quantity = pod.cpuUsage
-					case "memUsage":
-						quantity = pod.memUsage
+					case "cpuUsage (%)":
+						if pod.cpuUsage == nil {
+							return "<none>"
+						}
+						if pod.resources["cpuReq"] == nil || pod.resources["cpuReq"].IsZero() {
+							val, suffix := pod.cpuUsage.CanonicalizeBytes(make([]byte, 0, 100))
+							return string(val) + string(suffix)
+						}
+						percentage := float64(pod.cpuUsage.MilliValue()) / float64(pod.resources["cpuReq"].MilliValue()) * 100
+						val, suffix := pod.cpuUsage.CanonicalizeBytes(make([]byte, 0, 100))
+						return fmt.Sprintf("%s%s (%.0f%%)", string(val), string(suffix), percentage)
+					case "memUsage (%)":
+						if pod.memUsage == nil {
+							return "<none>"
+						}
+						if pod.resources["memReq"] == nil || pod.resources["memReq"].IsZero() {
+							val, suffix := pod.memUsage.CanonicalizeBytes(make([]byte, 0, 100))
+							return string(val) + string(suffix)
+						}
+						percentage := float64(pod.memUsage.Value()) / float64(pod.resources["memReq"].Value()) * 100
+						val, suffix := pod.memUsage.CanonicalizeBytes(make([]byte, 0, 100))
+						return fmt.Sprintf("%s%s (%.0f%%)", string(val), string(suffix), percentage)
 					default:
 						quantity = pod.resources[key]
+						if quantity == nil {
+							return "<none>"
+						}
+						val, suffix := quantity.CanonicalizeBytes(make([]byte, 0, 100))
+						return string(val) + string(suffix)
 					}
-					val, suffix := quantity.CanonicalizeBytes(make([]byte, 0, 100))
-					return string(val) + string(suffix)
 				}
 			}(key),
 		}
