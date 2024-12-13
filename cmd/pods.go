@@ -16,11 +16,13 @@ import (
 	"github.com/spf13/cobra"
 	resource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metrics "k8s.io/metrics/pkg/client/clientset/versioned"
 )
 
 var (
 	podSortBy string
 	namespace string
+	verbose   bool
 )
 
 var podsCmd = &cobra.Command{
@@ -42,6 +44,8 @@ type podInfo struct {
 	nodeName   string
 	resources  map[string]*resource.Quantity
 	phase      string
+	cpuUsage   *resource.Quantity
+	memUsage   *resource.Quantity
 }
 
 func toPodColumnName(key string) string {
@@ -53,7 +57,26 @@ func toPodColumnName(key string) string {
 	return strings.ToUpper(key)
 }
 
-var podColumns []podColumn
+var podColumns = []podColumn{
+	{
+		header: "NAMESPACE",
+		getter: func(pod podInfo) string {
+			return pod.namespace
+		},
+	},
+	{
+		header: "NAME",
+		getter: func(pod podInfo) string {
+			return pod.name
+		},
+	},
+	{
+		header: "STATUS",
+		getter: func(pod podInfo) string {
+			return pod.phase
+		},
+	},
+}
 
 type podInfoList []podInfo
 
@@ -74,6 +97,16 @@ func (p podInfoList) Less(i, j int) bool {
 }
 
 func runPodsCommand() {
+	// Add NODE column if verbose flag is set
+	if verbose {
+		nodeColumn := podColumn{
+			header: "NODE",
+			getter: func(pod podInfo) string {
+				return pod.nodeName
+			},
+		}
+		podColumns = append(podColumns, nodeColumn)
+	}
 	// Get pods
 	var pods *v1.PodList
 	var err error
@@ -86,6 +119,35 @@ func runPodsCommand() {
 	
 	if err != nil {
 		panic(err.Error())
+	}
+
+	// Get metrics client
+	metricsClient, err := metrics.NewForConfig(client.Config)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	// Get pod metrics
+	podMetrics, err := metricsClient.MetricsV1beta1().PodMetricses("").List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		fmt.Printf("Warning: Could not fetch metrics: %v\n", err)
+	}
+
+	// Create metrics lookup map
+	metricsMap := make(map[string]map[string]*resource.Quantity)
+	if podMetrics != nil {
+		for _, podMetric := range podMetrics.Items {
+			key := fmt.Sprintf("%s/%s", podMetric.Namespace, podMetric.Name)
+			metricsMap[key] = map[string]*resource.Quantity{
+				"cpu":    resource.NewQuantity(0, resource.DecimalSI),
+				"memory": resource.NewQuantity(0, resource.BinarySI),
+			}
+			
+			for _, container := range podMetric.Containers {
+				metricsMap[key]["cpu"].Add(container.Usage[v1.ResourceCPU])
+				metricsMap[key]["memory"].Add(container.Usage[v1.ResourceMemory])
+			}
+		}
 	}
 
 	// Convert to podInfo list
@@ -120,13 +182,24 @@ func runPodsCommand() {
 			}
 		}
 
-		podsList = append(podsList, podInfo{
+		info := podInfo{
 			name:      pod.Name,
 			namespace: pod.Namespace,
 			nodeName:  pod.Spec.NodeName,
 			resources: resources,
 			phase:     string(pod.Status.Phase),
-		})
+			cpuUsage:  resource.NewQuantity(0, resource.DecimalSI),
+			memUsage:  resource.NewQuantity(0, resource.BinarySI),
+		}
+
+		// Add metrics if available
+		key := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+		if metrics, ok := metricsMap[key]; ok {
+			info.cpuUsage = metrics["cpu"]
+			info.memUsage = metrics["memory"]
+		}
+
+		podsList = append(podsList, info)
 	}
 
 	// Sort the slice
@@ -160,42 +233,24 @@ func getPodRowValues(pod podInfo, isHeader bool) []string {
 }
 
 func init() {
-	// Initialize base columns
-	podColumns = []podColumn{
-		{
-			header: "NAMESPACE",
-			getter: func(pod podInfo) string {
-				return pod.namespace
-			},
-		},
-		{
-			header: "NAME",
-			getter: func(pod podInfo) string {
-				return pod.name
-			},
-		},
-		{
-			header: "NODE",
-			getter: func(pod podInfo) string {
-				return pod.nodeName
-			},
-		},
-		{
-			header: "STATUS",
-			getter: func(pod podInfo) string {
-				return pod.phase
-			},
-		},
-	}
 
 	// Add resource columns dynamically
-	resourceKeys := []string{"cpuReq", "cpuLimit", "memReq", "memLimit"}
+	resourceKeys := []string{"cpuReq", "cpuLimit", "cpuUsage", "memReq", "memLimit", "memUsage"}
 	for _, key := range resourceKeys {
 		col := podColumn{
 			header: toPodColumnName(key),
 			getter: func(key string) func(pod podInfo) string {
 				return func(pod podInfo) string {
-					val, suffix := pod.resources[key].CanonicalizeBytes(make([]byte, 0, 100))
+					var quantity *resource.Quantity
+					switch key {
+					case "cpuUsage":
+						quantity = pod.cpuUsage
+					case "memUsage":
+						quantity = pod.memUsage
+					default:
+						quantity = pod.resources[key]
+					}
+					val, suffix := quantity.CanonicalizeBytes(make([]byte, 0, 100))
 					return string(val) + string(suffix)
 				}
 			}(key),
@@ -206,4 +261,6 @@ func init() {
 	rootCmd.AddCommand(podsCmd)
 	podsCmd.Flags().StringVar(&podSortBy, "sort-by", "name", "Sort pods by: name, cpu-req, cpu-limit, mem-req, mem-limit")
 	podsCmd.Flags().StringVarP(&namespace, "namespace", "n", "", "If present, show pods in the specified namespace only")
+	podsCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show additional columns like NODE")
+
 }
