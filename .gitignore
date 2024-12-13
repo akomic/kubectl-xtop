@@ -3,3 +3,5 @@ kubectl-xtop.linux.amd64
 kubectl-xtop.darwin.amd64
 kubectl-xtop.darwin.arm64
 **/*~
+.aider*
+.env
