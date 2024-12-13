@@ -17,12 +17,14 @@ import (
 	resource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	metrics "k8s.io/metrics/pkg/client/clientset/versioned"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 var (
-	podSortBy string
-	namespace string
-	verbose   bool
+	podSortBy    string
+	namespace    string
+	verbose      bool
+	allNamespaces bool
 )
 
 var podsCmd = &cobra.Command{
@@ -111,10 +113,20 @@ func runPodsCommand() {
 	var pods *v1.PodList
 	var err error
 	
-	if namespace != "" {
-		pods, err = client.Clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{})
-	} else {
+	if allNamespaces {
 		pods, err = client.Clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
+	} else {
+		// Get current namespace from config if not specified
+		if namespace == "" {
+			loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+			configOverrides := &clientcmd.ConfigOverrides{}
+			kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
+			namespace, _, err = kubeConfig.Namespace()
+			if err != nil || namespace == "" {
+				namespace = "default"
+			}
+		}
+		pods, err = client.Clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{})
 	}
 	
 	if err != nil {
@@ -281,7 +293,8 @@ func init() {
 
 	rootCmd.AddCommand(podsCmd)
 	podsCmd.Flags().StringVar(&podSortBy, "sort-by", "name", "Sort pods by: name, cpu-req, cpu-limit, mem-req, mem-limit")
-	podsCmd.Flags().StringVarP(&namespace, "namespace", "n", "", "If present, show pods in the specified namespace only")
+	podsCmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Show pods in the specified namespace")
 	podsCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show additional columns like NODE")
+	podsCmd.Flags().BoolVarP(&allNamespaces, "all-namespaces", "A", false, "Show pods from all namespaces")
 
 }
